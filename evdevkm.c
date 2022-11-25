@@ -17,14 +17,15 @@
 
 #define MAX_EVENTS 10
 
-//TODO refactor methods to reduce code
+char *label_host = "host";
+char *label_guest = "guest";
 
 const char *argp_program_version = "0.0.1";
 const char *argp_program_bug_address = "/dev/null";
 
 static char doc[] = "evdevkm tool";
 
-static char args_doc[] = "";
+static char args_doc[] = "[Device...]";
 
 static struct argp_option options[] = {
 	{ "verbose", 'v', 0, 0, "Verbose output" },
@@ -45,25 +46,29 @@ enum TARGET {
 	guest
 };
 
-void target_name(enum TARGET target, char *name, int name_length) {
+char* target_label(enum TARGET target) {
 	switch (target) {
 		case host:
-			strncpy(name, "host", name_length);
-			break;
+			return label_host;
 		case guest:
-			strncpy(name, "guest", name_length);
-			break;
+			return label_guest;
 	}
 }			
 
 enum TARGET flip_target(enum TARGET target) {
 	switch (target) {
-	case host:
-	return guest;
-	case guest:
-	return host;
+		case host:
+			return guest;
+		case guest:
+			return host;
 	}
 }
+
+struct DeviceTarget {
+	enum TARGET target;
+	struct libevdev_uinput *uidev;
+	char *symlink_path;
+};
 
 struct Device {
 	char *device_path;
@@ -71,20 +76,26 @@ struct Device {
 	int device_fd;
 	struct libevdev *device;
 
-	struct libevdev_uinput *uidev_host;
-	char *uidev_host_symlink_path;
-
-	struct libevdev_uinput *uidev_guest;
-	char *uidev_guest_symlink_path;
+	struct DeviceTarget *host;
+	struct DeviceTarget *guest;
 
 	struct Device *next;
 };
+
+struct DeviceTarget* device_target(struct Device *d, enum TARGET target) {
+	switch (target) {
+		case host:
+			return d->host;
+		case guest:
+			return d->guest;
+	}
+}
 
 int is_valid(struct Device *device) {
 	struct stat st;
 
 	if (stat(device->device_path, &st) < 0 && S_ISREG(st.st_mode) == false) {
-	return false;
+		return false;
 	}
 
 	return true;
@@ -98,6 +109,20 @@ int is_readable_and_writable(struct Device *device) {
 	return 0;//TODO
 }
 
+void free_device_target(struct DeviceTarget *t) {
+	if (t->uidev != NULL) {
+		libevdev_uinput_destroy(t->uidev);
+		t->uidev = NULL;
+	}
+
+	if (t->symlink_path) {
+		free(t->symlink_path);
+		t->symlink_path = NULL;
+	}
+
+	free(t);
+}
+
 void free_device(struct Device *device) {
 	if (device->device_path != NULL) {
 		free(device->device_path);
@@ -109,25 +134,17 @@ void free_device(struct Device *device) {
 		device->device_fd = -1;
 	}
 
-	if (device->uidev_host != NULL) {
-		libevdev_uinput_destroy(device->uidev_host);
-		device->uidev_host = NULL;
+	if (device->host != NULL) {
+		free_device_target(device->host);
+		device->host = NULL;
 	}
 
-	if (device->uidev_host_symlink_path != NULL) {
-		free(device->uidev_host_symlink_path);
-		device->uidev_host_symlink_path = NULL;
+	if (device->guest != NULL) {
+		free_device_target(device->guest);
+		device->guest = NULL;
 	}
 
-	if (device->uidev_guest != NULL) {
-		libevdev_uinput_destroy(device->uidev_guest);
-		device->uidev_guest = NULL;
-	}
-
-	if (device->uidev_guest_symlink_path != NULL) {
-		free(device->uidev_guest_symlink_path);
-		device->uidev_guest_symlink_path = NULL;
-	}
+	free(device);
 }
 
 int epoll_add(int epfd, int fd, void *ptr) {
@@ -145,36 +162,33 @@ int epoll_add(int epfd, int fd, void *ptr) {
   return epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
 }
 
-int initialize_symlink_paths(struct Device *device) {
-	int rc;
-	char *path, *copy, *name;
+int initialize_symlink_path(struct Device *d, enum TARGET target) {
+	int rc = 0;
+	char *path, *name, *label;
 	size_t size;
+	struct DeviceTarget *t;
 
 	path = "/dev/input/by-path";
+	name = basename(d->device_path);
 
-	copy = strdup(device->device_path);
-	name = basename(copy);
+	t = device_target(d, target);
 
-	size = strlen(path)+strlen(name)+7;
-	device->uidev_host_symlink_path = malloc(sizeof(char)*size);
-	rc = snprintf(device->uidev_host_symlink_path, size, "%s/%s-%s", path, name, "host");
+	label = target_label(t->target);
 
+	size = strlen(path)+strlen(name)+strlen(label)+4;
+
+	t->symlink_path = malloc(sizeof(char)*size);
+	if (t->symlink_path == NULL) {
+		return -1;
+	}
+
+	rc = snprintf(t->symlink_path, size, "%s/%s-%s", path, name, label);
 	if (rc < 0) {
-		free(copy);
+		free(t->symlink_path);
 		return rc;
 	}
 
-	size = strlen(path)+strlen(name)+8;
-	device->uidev_guest_symlink_path = malloc(sizeof(char)*size);
-	rc = snprintf(device->uidev_guest_symlink_path, size, "%s/%s-%s", path, name, "guest");
-
-	if (rc < 0) {
-		free(copy);
-		return rc;
-	}
-
-	free(copy);
-	return rc;
+	return 0;
 }
 
 int file_exists(char *path) {
@@ -182,33 +196,28 @@ int file_exists(char *path) {
 	return stat(path, &st) == 0;
 }
 
-int initialize_symlinks(struct Device *device) {
+int initialize_symlink(struct Device *d, enum TARGET target) {
 	int rc;
 
-	if (file_exists(device->uidev_host_symlink_path)) {
-		rc = remove(device->uidev_host_symlink_path);
+	struct DeviceTarget *t = device_target(d,target);
+
+	rc = initialize_symlink_path(d, target);
+	if (rc < 0) { 
+		fprintf(stderr, "failed to generate symlink path");
+	}
+
+	if (file_exists(t->symlink_path)); {
+		rc = remove(t->symlink_path);
 		if (rc < 0) {
-			printf("failed to remove %s with code %d\n", device->uidev_host_symlink_path, rc);
+			fprintf(stderr, "failed to remove %s with code %d\n", t->symlink_path, rc);
 		}
 	}
 
-	rc = symlink(libevdev_uinput_get_devnode(device->uidev_host), device->uidev_host_symlink_path);
+	rc = symlink(libevdev_uinput_get_devnode(t->uidev), t->symlink_path);
 	if (rc < 0) {
-		printf("symlink creation failed for %s -> %s\n", 
-			device->uidev_host_symlink_path, 
-			libevdev_uinput_get_devnode(device->uidev_host));
-		return rc;
-	}
-
-	if (file_exists(device->uidev_guest_symlink_path)) {
-		rc = remove(device->uidev_guest_symlink_path);
-	}
-
-	rc = symlink(libevdev_uinput_get_devnode(device->uidev_guest), device->uidev_guest_symlink_path);
-	if (rc < 0) {
-		printf("symlink creation failed for %s -> %s\n", 
-			device->uidev_guest_symlink_path, 
-			libevdev_uinput_get_devnode(device->uidev_guest));
+		fprintf(stderr, "symlink creation failed for %s -> %s\n", 
+			t->symlink_path, 
+			libevdev_uinput_get_devnode(t->uidev));
 		return rc;
 	}
 
@@ -231,78 +240,79 @@ int initialize_drain(char *path) {
 	return 0;
 }
 
+int initialize_target(struct Device *device, enum TARGET target, int verbose) {
+	int rc;
+	char *label;
+	struct DeviceTarget *t = device_target(device, target);
+
+	label = target_label(target);
+
+	rc = libevdev_uinput_create_from_device(device->device, LIBEVDEV_UINPUT_OPEN_MANAGED, &(t->uidev));
+	if (rc < 0) {
+		fprintf(stderr, "failed to create %s input\n", label);
+		return rc;
+	}
+
+	if (verbose) {
+		fprintf(stderr, "create uinput device: %s\n", libevdev_uinput_get_devnode(t->uidev));
+	}
+
+	rc = initialize_symlink(device, target);
+	if (rc < 0) {
+		return 0;
+	}
+
+	return 0;
+}
+
+
 int initialize(struct Device *device, int epfd, int grab, int verbose) {
 	int rc, uifd;
 
 	rc = initialize_drain(device->device_path);
 	if (rc < 0) {
-		printf("failed to drain %s\n", device->device_path);
+		fprintf(stderr, "failed to drain %s\n", device->device_path);
 	}
 
 	device->device_fd = open(device->device_path, O_RDONLY|O_NONBLOCK);
 	if (device->device_fd < 0) {
-		printf("failed to on %s\n", device->device_path);
+		fprintf(stderr, "failed to on %s\n", device->device_path);
 		return -1;
 	}
+
 	printf("d: %d\n", device->device_fd);
 
 	rc = libevdev_new_from_fd(device->device_fd, &(device->device));
 	if (rc < 0) {
-		printf("failed to initialize %s (%d)\n", device->device_path, rc);
+		fprintf(stderr, "failed to initialize %s (%d)\n", device->device_path, rc);
 		return rc;
 	}
 
   rc = epoll_add(epfd, device->device_fd, device); 
 	if (rc < 0) {
-		printf("failed to poll %s\n", device->device_path);
+		fprintf(stderr, "failed to poll %s\n", device->device_path);
 		return rc;
 	}
 
-	rc = libevdev_uinput_create_from_device(device->device, LIBEVDEV_UINPUT_OPEN_MANAGED, &(device->uidev_host));
+	rc = initialize_target(device, host, verbose);
 	if (rc < 0) {
-		printf("failed to create host uinput\n");
-		return rc;
+		return 0;
 	}
 
-	if (verbose) {
-		printf("Host uinput device: %s\n", libevdev_uinput_get_devnode(device->uidev_host));
-	}
-
-	rc = libevdev_uinput_create_from_device(device->device, LIBEVDEV_UINPUT_OPEN_MANAGED, &(device->uidev_guest));
+	rc = initialize_target(device, guest, verbose);
 	if (rc < 0) {
-		printf("failed to create guest uinput\n");
-		return rc;
-	}
-
-	if (verbose) {
-		printf("Guest uinput device: %s\n", libevdev_uinput_get_devnode(device->uidev_guest));
-	}
-	
-	rc = initialize_symlink_paths(device);
-	if (rc < 0) {
-		return rc;
-	}
-
-	if (verbose) {
-		printf("symlink path host:  %s\n", device->uidev_host_symlink_path);
-		printf("symlink path guest: %s\n", device->uidev_guest_symlink_path);
-	}
-
-	rc = initialize_symlinks(device);
-	if (rc < 0) {
-		printf("failed to create symlinks");
-		return rc;
+		return 0;
 	}
 
 	if (grab) {
 		rc = libevdev_grab(device->device, LIBEVDEV_GRAB);
 		if (rc < 0) {
-			printf("failed to grab device");
+			fprintf(stderr, "failed to grab device");
 			return rc;
 		} 
 
 		if (verbose) {
-			printf("grabbed device %s\n", device->device_path);
+			fprintf(stderr, "grabbed device %s\n", device->device_path);
 		}
 	}
 
@@ -311,7 +321,9 @@ int initialize(struct Device *device, int epfd, int grab, int verbose) {
 
 int next_event(struct Device *device, enum TARGET *target, int skip, int verbose) {
 	int rc;
+	enum TARGET previous_target;
 	struct input_event ev;
+	char *from, *to;
 
 	rc = libevdev_next_event(device->device, LIBEVDEV_READ_FLAG_NORMAL, &ev);
 	switch (rc) {
@@ -341,15 +353,13 @@ int next_event(struct Device *device, enum TARGET *target, int skip, int verbose
 	}
 
 	if (ev.type == EV_KEY && ev.code == KEY_RIGHTSHIFT && ev.value == 1) {
-		enum TARGET previous_target = *target;
+		previous_target = *target;
 
 		*target = flip_target(*target);
 
 		if (verbose) {
-			char from[6], to[6];
-
-			target_name(previous_target, from, 6);
-			target_name(*target, to, 6);
+			from = target_label(previous_target);
+			to = target_label(*target);
 
 			printf("flipped target from %s to %s\n", from, to);
 		}
@@ -358,16 +368,16 @@ int next_event(struct Device *device, enum TARGET *target, int skip, int verbose
 	if (skip == false) {
 		switch (*target) {
 			case host:
-				rc = libevdev_uinput_write_event(device->uidev_host, ev.type, ev.code, ev.value);
+				rc = libevdev_uinput_write_event(device->host->uidev, ev.type, ev.code, ev.value);
 				if (rc < 0) {
-					printf("failed write event\n");
+					fprintf(stderr, "failed write event\n");
 					return rc;
 				}
 				break;
 			case guest:
-				rc = libevdev_uinput_write_event(device->uidev_guest, ev.type, ev.code, ev.value);
+				rc = libevdev_uinput_write_event(device->guest->uidev, ev.type, ev.code, ev.value);
 				if (rc < 0) {
-					printf("failed write event\n");
+					fprintf(stderr, "failed write event\n");
 					return rc;
 				}
 				break;
@@ -377,7 +387,25 @@ int next_event(struct Device *device, enum TARGET *target, int skip, int verbose
 	return 0;
 }
 
+int create_device_target(struct DeviceTarget **device_target, enum TARGET target) {
+	struct DeviceTarget *t;
+
+	t = malloc(sizeof(struct DeviceTarget));
+	if (t == NULL) {
+		return -1;
+	}
+
+	t->target = target;
+	t->uidev = NULL;
+	t->symlink_path = NULL;
+
+	(*device_target) = t;
+
+	return 0;
+}
+
 int create(struct Device **device, char *device_path) {
+	int rc;
 	struct Device *d;
 
 	d = malloc(sizeof(struct Device));
@@ -394,15 +422,22 @@ int create(struct Device **device, char *device_path) {
 
 	d->device_fd = -1;
 	d->device = NULL;
-	d->uidev_host = NULL;
-	d->uidev_host_symlink_path = NULL;
-	d->uidev_guest = NULL;
-	d->uidev_guest_symlink_path = NULL;
+
+	rc = create_device_target(&(d->host), host);
+	if (rc < 0) {
+		return rc;
+	}
+
+	rc = create_device_target(&(d->guest), guest);
+	if (rc < 0) {
+		return rc;
+	}
+
 	d->next = NULL;
 
 	(*device) = d;
 
-	return true;
+	return 0;
 }
 
 void append(struct Device **head, struct Device *device) {
@@ -506,12 +541,12 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 			struct Device *d;
 
 			rc = create(&d, arg);
-			if (rc == false) {
+			if (rc < 0) {
 				return ARGP_HELP_STD_USAGE;
 			}
 
 			if (!is_valid(d)) {
-				printf("%s is not a valid device", arg);
+				fprintf(stderr, "%s is not a valid device", arg);
 				return ARGP_HELP_STD_ERR;
 			}
 
@@ -546,13 +581,13 @@ int main(int argc, char **argv) {
 
 		for (d = arguments.head; d != NULL; d = d->next) {
 			if (!is_valid(d)) { 
-				printf("device %s is invalid\n", d->device_path);
+				fprintf(stderr, "device %s is invalid\n", d->device_path);
 				cleanup(arguments.head, &epfd, &signal_fd);
 				exit(1);
 			}
 
 			if (initialize(d, epfd, arguments.grab, arguments.verbose) < 0) {
-				printf("device %s failed to initialize\n", d->device_path);
+				fprintf(stderr, "device %s failed to initialize\n", d->device_path);
 				cleanup(arguments.head,  &epfd, &signal_fd);
 				exit(1);
 			}
