@@ -31,6 +31,7 @@ static struct argp_option options[] = {
 	{ "verbose", 'v', 0, 0, "Verbose output" },
 	{ "grab", 'g', 0, 0, "Grab device" },
 	{ "no-symlink", 'n', 0, 0, "Create no symlinks" },
+	{ "user", 'u', 0, 0, "Uid or user name to assign to guest device" },
 	{ 0 }
 };
 
@@ -38,6 +39,7 @@ struct arguments {
 	int verbose;
 	int grab;
 	int no_symlink;
+	char *uid_or_user_name;
 	struct Device *head;
 };
 
@@ -65,9 +67,12 @@ enum TARGET flip_target(enum TARGET target) {
 }
 
 struct DeviceTarget {
-	enum TARGET target;
 	struct libevdev_uinput *uidev;
 	char *symlink_path;
+};
+
+struct Options {
+	uid_t user_for_symbolic_link;
 };
 
 struct Device {
@@ -76,10 +81,12 @@ struct Device {
 	int device_fd;
 	struct libevdev *device;
 
-	struct DeviceTarget *host;
-	struct DeviceTarget *guest;
+	struct DeviceTarget *host;//TODO make non-pointer?
+	struct DeviceTarget *guest;//TODO make non-pointer?
 
 	struct Device *next;
+
+	struct Options options;
 };
 
 struct DeviceTarget* device_target(struct Device *d, enum TARGET target) {
@@ -102,11 +109,23 @@ int is_valid(struct Device *device) {
 }
 
 int is_readable(struct Device *device) {
-	return 0;//TODO
+	//TODO
+	return 0;
 }
 
 int is_readable_and_writable(struct Device *device) {
-	return 0;//TODO
+	//TODO
+	return 0;
+}
+
+int uid_from_string(uid_t *uid, char *uid_or_user_name) {
+	//TODO
+	return 0;
+}
+
+int initialize_options(struct Options **options) {
+	//TODO
+	return 0;
 }
 
 void free_device_target(struct DeviceTarget *t) {
@@ -173,7 +192,7 @@ int initialize_symlink_path(struct Device *d, enum TARGET target) {
 
 	t = device_target(d, target);
 
-	label = target_label(t->target);
+	label = target_label(target);
 
 	size = strlen(path)+strlen(name)+strlen(label)+4;
 
@@ -203,7 +222,7 @@ int initialize_symlink(struct Device *d, enum TARGET target) {
 
 	rc = initialize_symlink_path(d, target);
 	if (rc < 0) { 
-		fprintf(stderr, "failed to generate symlink path");
+		fprintf(stderr, "failed to generate symlink path\n");
 	}
 
 	if (file_exists(t->symlink_path)); {
@@ -395,7 +414,6 @@ int create_device_target(struct DeviceTarget **device_target, enum TARGET target
 		return -1;
 	}
 
-	t->target = target;
 	t->uidev = NULL;
 	t->symlink_path = NULL;
 
@@ -487,20 +505,20 @@ int block_signals(int epfd) {
 
 	signal_fd = signalfd(-1, &mask, 0);
 	if (signal_fd == -1) {
-		fprintf(stderr, "failed to create signal file descriptor");
+		fprintf(stderr, "failed to create signal file descriptor\n");
 		return -1;
 	}
 
 	rc = sigprocmask(SIG_BLOCK, &mask, NULL);
 	if (rc < 0) {
-		fprintf(stderr, "failed to create sigprocmask");
+		fprintf(stderr, "failed to create sigprocmask\n");
 		close(signal_fd);
 		return rc;
 	}
 
 	rc = epoll_add(epfd, signal_fd, NULL);
 	if (rc < 0) {
-		fprintf(stderr, "failed to add signal file descriptor to epoll");
+		fprintf(stderr, "failed to add signal file descriptor to epoll\n");
 		close(signal_fd);
 		return rc;
 	}
@@ -523,7 +541,7 @@ void cleanup(struct Device *head, int *epfd, int *signal_fd) {
 }
 
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
-	int rc;
+	int rc = 0;
 
 	struct arguments *arguments = state->input;
 
@@ -537,26 +555,43 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 		case 'n':
 			arguments->no_symlink = true;
 			break;
+		case 'u':
+			arguments->uid_or_user_name = strdup(arg);
+			if (arguments->uid_or_user_name == NULL) {
+				fprintf(stderr, "failed to allocate memory for %s\n", arg);
+				rc = ARGP_HELP_STD_ERR;
+			}
+			break;
 		case ARGP_KEY_ARG:
 			struct Device *d;
 
 			rc = create(&d, arg);
 			if (rc < 0) {
-				return ARGP_HELP_STD_USAGE;
+				rc = ARGP_HELP_STD_USAGE;
+				break;
 			}
 
 			if (!is_valid(d)) {
-				fprintf(stderr, "%s is not a valid device", arg);
-				return ARGP_HELP_STD_ERR;
+				fprintf(stderr, "%s is not a valid device\n", arg);
+				rc = ARGP_HELP_STD_ERR;
+				break;
 			}
 
 			append(&(arguments->head), d);
-
 			break;
 	}
 
+	if (rc < 0) {
+		free_all_devices(arguments->head);
+
+		if (arguments->uid_or_user_name == NULL) {
+			free(arguments->uid_or_user_name);
+			arguments->uid_or_user_name = NULL;
+		}
+	}
+
 	return 0;
-};
+}
 
 static struct argp argp = { options, parse_opt, args_doc, doc };
 
@@ -567,6 +602,7 @@ int main(int argc, char **argv) {
 	struct epoll_event events[MAX_EVENTS];
 	enum TARGET target = host;
 
+	arguments.uid_or_user_name = NULL;
 	arguments.head = NULL;
 
 	argp_parse(&argp, argc, argv, 0, 0, &arguments);
@@ -574,7 +610,7 @@ int main(int argc, char **argv) {
 	if (arguments.head != NULL) {
 		epfd = epoll_create1(0);
 		if (epfd < 0) {
-			fprintf(stderr, "failed to create epoll file descriptor");
+			fprintf(stderr, "failed to create epoll file descriptor\n");
 			cleanup(arguments.head,  &epfd, &signal_fd);
 		};
 
@@ -594,7 +630,7 @@ int main(int argc, char **argv) {
 		}
 		signal_fd = block_signals(epfd);
 		if (signal_fd < 0) {
-			fprintf(stderr, "failed to adapt interrupt signal to epoll");
+			fprintf(stderr, "failed to adapt interrupt signal to epoll\n");
 			cleanup(arguments.head, &epfd, &signal_fd);
 		}
 
@@ -602,7 +638,7 @@ int main(int argc, char **argv) {
 			nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
 
 			if (nfds == -1) {
-				fprintf(stderr, "epoll failure");
+				fprintf(stderr, "epoll failure\n");
 				free_all_devices(arguments.head);
 				exit(1);
 			}
