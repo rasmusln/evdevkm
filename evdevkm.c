@@ -81,8 +81,8 @@ struct Device {
 	int device_fd;
 	struct libevdev *device;
 
-	struct DeviceTarget *host;//TODO make non-pointer?
-	struct DeviceTarget *guest;//TODO make non-pointer?
+	struct DeviceTarget host;
+	struct DeviceTarget guest;
 
 	struct Device *next;
 
@@ -92,9 +92,9 @@ struct Device {
 struct DeviceTarget* device_target(struct Device *d, enum TARGET target) {
 	switch (target) {
 		case host:
-			return d->host;
+			return &d->host;
 		case guest:
-			return d->guest;
+			return &d->guest;
 	}
 }
 
@@ -138,8 +138,6 @@ void free_device_target(struct DeviceTarget *t) {
 		free(t->symlink_path);
 		t->symlink_path = NULL;
 	}
-
-	free(t);
 }
 
 void free_device(struct Device *device) {
@@ -153,15 +151,8 @@ void free_device(struct Device *device) {
 		device->device_fd = -1;
 	}
 
-	if (device->host != NULL) {
-		free_device_target(device->host);
-		device->host = NULL;
-	}
-
-	if (device->guest != NULL) {
-		free_device_target(device->guest);
-		device->guest = NULL;
-	}
+	free_device_target(&device->host);
+	free_device_target(&device->guest);
 
 	free(device);
 }
@@ -373,7 +364,6 @@ int next_event(struct Device *device, enum TARGET *target, int skip, int verbose
 
 	if (ev.type == EV_KEY && ev.code == KEY_RIGHTSHIFT && ev.value == 1) {
 		previous_target = *target;
-
 		*target = flip_target(*target);
 
 		if (verbose) {
@@ -387,14 +377,14 @@ int next_event(struct Device *device, enum TARGET *target, int skip, int verbose
 	if (skip == false) {
 		switch (*target) {
 			case host:
-				rc = libevdev_uinput_write_event(device->host->uidev, ev.type, ev.code, ev.value);
+				rc = libevdev_uinput_write_event(device->host.uidev, ev.type, ev.code, ev.value);
 				if (rc < 0) {
 					fprintf(stderr, "failed write event\n");
 					return rc;
 				}
 				break;
 			case guest:
-				rc = libevdev_uinput_write_event(device->guest->uidev, ev.type, ev.code, ev.value);
+				rc = libevdev_uinput_write_event(device->guest.uidev, ev.type, ev.code, ev.value);
 				if (rc < 0) {
 					fprintf(stderr, "failed write event\n");
 					return rc;
@@ -402,22 +392,6 @@ int next_event(struct Device *device, enum TARGET *target, int skip, int verbose
 				break;
 		}
 	}
-
-	return 0;
-}
-
-int create_device_target(struct DeviceTarget **device_target, enum TARGET target) {
-	struct DeviceTarget *t;
-
-	t = malloc(sizeof(struct DeviceTarget));
-	if (t == NULL) {
-		return -1;
-	}
-
-	t->uidev = NULL;
-	t->symlink_path = NULL;
-
-	(*device_target) = t;
 
 	return 0;
 }
@@ -441,15 +415,11 @@ int create(struct Device **device, char *device_path) {
 	d->device_fd = -1;
 	d->device = NULL;
 
-	rc = create_device_target(&(d->host), host);
-	if (rc < 0) {
-		return rc;
-	}
+	d->host.uidev = NULL;
+	d->host.symlink_path = NULL;
 
-	rc = create_device_target(&(d->guest), guest);
-	if (rc < 0) {
-		return rc;
-	}
+	d->guest.uidev = NULL;
+	d->guest.symlink_path = NULL;
 
 	d->next = NULL;
 
