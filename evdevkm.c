@@ -36,14 +36,6 @@ static struct argp_option options[] = {
 	{ 0 }
 };
 
-struct arguments {
-	int verbose;
-	int grab;
-	int no_symlink;
-	uid_t uid;//TODO the declaration does not mention if this is signed or not and therefor negative value cannot be used as missing
-	struct Device *head;
-};
-
 enum TARGET {
 	host,
 	guest
@@ -79,7 +71,7 @@ struct Options {
 	uid_t uid;//TODO the declaration does not mention if this is signed or not and therefor negative value cannot be used as not defined
 };
 
-struct Device {
+struct Device {//TODO this is hiding a nother declaration from something?
 	char *device_path;
 
 	int device_fd;
@@ -92,6 +84,12 @@ struct Device {
 
 	struct Options options;
 };
+
+struct arguments {
+	struct Device *head;
+	struct Options options;
+};
+
 
 struct DeviceTarget* device_target(struct Device *d, enum TARGET target) {
 	switch (target) {
@@ -548,18 +546,18 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 
 	struct arguments *arguments = state->input;
 
-	switch (key) {
+	switch (key) {//TODO add struct Options to arguments
 		case 'v':
-			arguments->verbose = true;
+			arguments->options.verbose = true;
 			break;
 		case 'g':
-			arguments->grab = true;
+			arguments->options.grab = true;
 			break;
 		case 'n':
-			arguments->no_symlink = true;
+			arguments->options.no_symlink = true;
 			break;
 		case 'u':
-			rc = uid_from_string(&(arguments->uid), arg);
+			rc = uid_from_string(&(arguments->options.uid), arg);
 			if (rc < 0) {
 				fprintf(stderr, "%s is not a valid uid or user name\n", arg);
 				return ARGP_HELP_STD_USAGE;
@@ -601,18 +599,16 @@ int main(int argc, char **argv) {
 	struct epoll_event events[MAX_EVENTS];
 	enum TARGET target = host;
 
-	//TODO use argument parsing to other function
-	arguments.uid = -1;
 	arguments.head = NULL;
+	arguments.options.verbose = false;
+	arguments.options.grab = false;
+	arguments.options.no_symlink = false;
+	arguments.options.uid = -1;
 
 	argp_parse(&argp, argc, argv, 0, 0, &arguments);
 
 	head = arguments.head;
-
-	options.verbose = arguments.verbose;
-	options.grab = arguments.grab;
-	options.no_symlink = arguments.no_symlink;
-	options.uid = arguments.uid;
+	options = arguments.options;
 
 	if (head != NULL) {
 
