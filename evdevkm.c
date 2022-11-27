@@ -8,6 +8,7 @@
 #include <argp.h>
 #include <libgen.h>
 #include <signal.h>
+#include <pwd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/epoll.h>
@@ -39,7 +40,7 @@ struct arguments {
 	int verbose;
 	int grab;
 	int no_symlink;
-	char *uid_or_user_name;
+	uid_t uid;//TODO the declaration does not mention if this is signed or not and therefor negative value cannot be used as missing
 	struct Device *head;
 };
 
@@ -72,7 +73,10 @@ struct DeviceTarget {
 };
 
 struct Options {
-	uid_t user_for_symbolic_link;
+	bool verbose;
+	bool grab;
+	bool no_symlink;
+	uid_t uid;//TODO the declaration does not mention if this is signed or not and therefor negative value cannot be used as not defined
 };
 
 struct Device {
@@ -131,10 +135,10 @@ int uid_from_string(uid_t *uid, char *uid_or_user_name) {
 	struct passwd *pwd;
 
 	if (is_only_digit(uid_or_user_name)) {
-		uid_t i = strtol(uid_or_user_name);
+		uid_t i = strtol(uid_or_user_name, NULL, 10);
 		pwd = getpwuid(i);
 	} else {
-		pwd = getpwname(uid_or_user_name);
+		pwd = getpwnam(uid_or_user_name);
 	}
 
 	if (pwd == NULL) {
@@ -142,20 +146,7 @@ int uid_from_string(uid_t *uid, char *uid_or_user_name) {
 		return -1;
 	}
 
-	*uid = pwd.pw_uid;
-
-	return 0;
-}
-
-int initialize_options(struct Options **options, char *uid_or_user_name) {
-	int rc;
-
-	options = malloc(sizeof(struct Options));
-
-	rc = uid_from_string(&(options.uid), uid_or_user_name);
-	if (rc < 0) {
-		return rc;
-	}
+	*uid = pwd->pw_uid;
 
 	return 0;
 }
@@ -238,7 +229,7 @@ int file_exists(char *path) {
 	return stat(path, &st) == 0;
 }
 
-int initialize_symlink(struct Device *d, enum TARGET target) {
+int initialize_symlink(struct Device *d, struct Options *options,  enum TARGET target) {
 	int rc;
 
 	struct DeviceTarget *t = device_target(d,target);
@@ -263,6 +254,14 @@ int initialize_symlink(struct Device *d, enum TARGET target) {
 		return rc;
 	}
 
+	if (options->uid >= 0 && target == guest) {
+		rc = chown(libevdev_uinput_get_devnode(t->uidev), options->uid, -1);
+		if (rc < 0) {
+			fprintf(stderr, "failed to set uid for %s\n", libevdev_uinput_get_devnode(t->uidev));
+			return rc;
+		}
+	}
+
 	return 0;
 }
 
@@ -282,7 +281,7 @@ int initialize_drain(char *path) {
 	return 0;
 }
 
-int initialize_target(struct Device *device, enum TARGET target, int verbose) {
+int initialize_target(struct Device *device, struct Options *options, enum TARGET target) {
 	int rc;
 	char *label;
 	struct DeviceTarget *t = device_target(device, target);
@@ -295,14 +294,12 @@ int initialize_target(struct Device *device, enum TARGET target, int verbose) {
 		return rc;
 	}
 
-	if (verbose) {
+	if (options->verbose) {
 		fprintf(stderr, "create uinput device: %s\n", libevdev_uinput_get_devnode(t->uidev));
 	}
 
-	//TODO use no-symlink-arg
-	//TODO use uid arg from opions
-	if (true) {
-		rc = initialize_symlink(device, target);
+	if (!options->no_symlink) {
+		rc = initialize_symlink(device, options, target);
 		if (rc < 0) {
 			return 0;
 		}
@@ -312,7 +309,7 @@ int initialize_target(struct Device *device, enum TARGET target, int verbose) {
 }
 
 
-int initialize(struct Device *device, int epfd, int grab, int verbose) {
+int initialize(struct Device *device, struct Options *options,  int epfd) {
 	int rc, uifd;
 
 	rc = initialize_drain(device->device_path);
@@ -340,32 +337,32 @@ int initialize(struct Device *device, int epfd, int grab, int verbose) {
 		return rc;
 	}
 
-	rc = initialize_target(device, host, verbose);
+	rc = initialize_target(device, options, host);
 	if (rc < 0) {
 		return 0;
 	}
 
-	rc = initialize_target(device, guest, verbose);
+	rc = initialize_target(device, options, guest);
 	if (rc < 0) {
 		return 0;
 	}
 
-	if (grab) {
+	if (options->grab) {
 		rc = libevdev_grab(device->device, LIBEVDEV_GRAB);
 		if (rc < 0) {
 			fprintf(stderr, "failed to grab device");
 			return rc;
 		} 
 
-		if (verbose) {
-			fprintf(stderr, "grabbed device %s\n", device->device_path);
+		if (options->verbose) {
+			printf("grabbed device %s\n", device->device_path);
 		}
 	}
 
 	return 0;
 }
 
-int next_event(struct Device *device, enum TARGET *target, int skip, int verbose) {
+int next_event(struct Device *device, struct Options *options, enum TARGET *target, int skip) {
 	int rc;
 	enum TARGET previous_target;
 	struct input_event ev;
@@ -374,12 +371,12 @@ int next_event(struct Device *device, enum TARGET *target, int skip, int verbose
 	rc = libevdev_next_event(device->device, LIBEVDEV_READ_FLAG_NORMAL, &ev);
 	switch (rc) {
 		case LIBEVDEV_READ_STATUS_SUCCESS:
-			if (verbose) {
+			if (options->verbose) {
 				printf("next event -> status success\n");
 			}
 			break;
 		case LIBEVDEV_READ_STATUS_SYNC:
-			if (verbose) {
+			if (options->verbose) {
 				printf("next event -> status sync\n");
 			}
 			break;
@@ -391,7 +388,7 @@ int next_event(struct Device *device, enum TARGET *target, int skip, int verbose
 	return rc;
 	}
 
-	if (verbose) {
+	if (options->verbose) {
 		printf("event: %s %s %d\n",
 			libevdev_event_type_get_name(ev.type),
 			libevdev_event_code_get_name(ev.type, ev.code),
@@ -402,7 +399,7 @@ int next_event(struct Device *device, enum TARGET *target, int skip, int verbose
 		previous_target = *target;
 		*target = flip_target(*target);
 
-		if (verbose) {
+		if (options->verbose) {
 			from = target_label(previous_target);
 			to = target_label(*target);
 
@@ -562,10 +559,10 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 			arguments->no_symlink = true;
 			break;
 		case 'u':
-			arguments->uid_or_user_name = strdup(arg);
-			if (arguments->uid_or_user_name == NULL) {
-				fprintf(stderr, "failed to allocate memory for %s\n", arg);
-				rc = ARGP_HELP_STD_ERR;
+			rc = uid_from_string(&(arguments->uid), arg);
+			if (rc < 0) {
+				fprintf(stderr, "%s is not a valid uid or user name\n", arg);
+				return ARGP_HELP_STD_USAGE;
 			}
 			break;
 		case ARGP_KEY_ARG:
@@ -589,11 +586,6 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 
 	if (rc < 0) {
 		free_all_devices(arguments->head);
-
-		if (arguments->uid_or_user_name == NULL) {
-			free(arguments->uid_or_user_name);
-			arguments->uid_or_user_name = NULL;
-		}
 	}
 
 	return 0;
@@ -604,16 +596,25 @@ static struct argp argp = { options, parse_opt, args_doc, doc };
 int main(int argc, char **argv) {
 	int rc, epfd = -1, signal_fd = -1, nfds, n;
 	struct arguments arguments;
-	struct Device *d;
+	struct Device *head, *d;
+	struct Options options;
 	struct epoll_event events[MAX_EVENTS];
 	enum TARGET target = host;
 
-	arguments.uid_or_user_name = NULL;
+	//TODO use argument parsing to other function
+	arguments.uid = -1;
 	arguments.head = NULL;
 
 	argp_parse(&argp, argc, argv, 0, 0, &arguments);
 
-	if (arguments.head != NULL) {
+	head = arguments.head;
+
+	options.verbose = arguments.verbose;
+	options.grab = arguments.grab;
+	options.no_symlink = arguments.no_symlink;
+	options.uid = arguments.uid;
+
+	if (head != NULL) {
 
 		epfd = epoll_create1(0);
 		if (epfd < 0) {
@@ -621,17 +622,16 @@ int main(int argc, char **argv) {
 			cleanup(arguments.head,  &epfd, &signal_fd);
 		};
 
-
-		for (d = arguments.head; d != NULL; d = d->next) {
+		for (d = head; d != NULL; d = d->next) {
 			if (!is_valid(d)) { 
 				fprintf(stderr, "device %s is invalid\n", d->device_path);
-				cleanup(arguments.head, &epfd, &signal_fd);
+				cleanup(head, &epfd, &signal_fd);
 				exit(1);
 			}
 
-			if (initialize(d, epfd, arguments.grab, arguments.verbose) < 0) {
+			if (initialize(d, &options, epfd) < 0) {
 				fprintf(stderr, "device %s failed to initialize\n", d->device_path);
-				cleanup(arguments.head,  &epfd, &signal_fd);
+				cleanup(head,  &epfd, &signal_fd);
 				exit(1);
 			}
 		}
@@ -639,7 +639,7 @@ int main(int argc, char **argv) {
 		signal_fd = block_signals(epfd);
 		if (signal_fd < 0) {
 			fprintf(stderr, "failed to adapt interrupt signal to epoll\n");
-			cleanup(arguments.head, &epfd, &signal_fd);
+			cleanup(head, &epfd, &signal_fd);
 		}
 
 		while (true) {
@@ -647,13 +647,13 @@ int main(int argc, char **argv) {
 
 			if (nfds == -1) {
 				fprintf(stderr, "epoll failure\n");
-				free_all_devices(arguments.head);
+				free_all_devices(head);
 				exit(1);
 			}
 
 			for (n = 0; n < nfds; n++) {
 				if (events[n].data.fd == signal_fd) {
-					cleanup(arguments.head, &epfd, &signal_fd);
+					cleanup(head, &epfd, &signal_fd);
 					exit(1);
 				}
 
@@ -661,7 +661,7 @@ int main(int argc, char **argv) {
 					d = (struct Device *) events[n].data.ptr;
 
 					for (rc = 0; !(rc < 0);) {
-						rc = next_event(d, &target, false, arguments.verbose); 
+						rc = next_event(d, &options, &target, false); //TODO false?
 						if (rc < 0) {
 							fprintf(stderr, "failed next event processing with %d\n", rc);
 						}
@@ -670,6 +670,6 @@ int main(int argc, char **argv) {
 			}
 		}
 
-		cleanup(arguments.head, &epfd, &signal_fd);
+		cleanup(head, &epfd, &signal_fd);
 	}
 }
