@@ -32,7 +32,7 @@ static struct argp_option options[] = {
 	{ "verbose", 'v', 0, 0, "Verbose output" },
 	{ "grab", 'g', 0, 0, "Grab device" },
 	{ "no-symlink", 'n', 0, 0, "Create no symlinks" },
-	{ "user", 'u', 0, 0, "Uid or user name to assign to guest device" },
+	{ "user", 'u', "UID_OR_USER_NAME", 0, "Uid or user name to assign to guest device" },
 	{ 0 }
 };
 
@@ -68,10 +68,11 @@ struct Options {
 	bool verbose;
 	bool grab;
 	bool no_symlink;
-	uid_t uid;//TODO the declaration does not mention if this is signed or not and therefor negative value cannot be used as not defined
+	bool is_uid_set;
+	uid_t uid;
 };
 
-struct Device {//TODO this is hiding a nother declaration from something?
+struct Device {
 	char *device_path;
 
 	int device_fd;
@@ -110,16 +111,6 @@ int is_valid(struct Device *device) {
 	return true;
 }
 
-int is_readable(struct Device *device) {
-	//TODO
-	return 0;
-}
-
-int is_readable_and_writable(struct Device *device) {
-	//TODO
-	return 0;
-}
-
 bool is_only_digit(char *s) {
 	for (int i = 0; i < strlen(s); i++) {
 		if (!isdigit(s[i])) {
@@ -131,7 +122,6 @@ bool is_only_digit(char *s) {
 
 int uid_from_string(uid_t *uid, char *uid_or_user_name) {
 	struct passwd *pwd;
-
 	if (is_only_digit(uid_or_user_name)) {
 		uid_t i = strtol(uid_or_user_name, NULL, 10);
 		pwd = getpwuid(i);
@@ -252,7 +242,7 @@ int initialize_symlink(struct Device *d, struct Options *options,  enum TARGET t
 		return rc;
 	}
 
-	if (options->uid >= 0 && target == guest) {
+	if (options->is_uid_set && target == guest) {
 		rc = chown(libevdev_uinput_get_devnode(t->uidev), options->uid, -1);
 		if (rc < 0) {
 			fprintf(stderr, "failed to set uid for %s\n", libevdev_uinput_get_devnode(t->uidev));
@@ -360,7 +350,7 @@ int initialize(struct Device *device, struct Options *options,  int epfd) {
 	return 0;
 }
 
-int next_event(struct Device *device, struct Options *options, enum TARGET *target, int skip) {
+int next_event(struct Device *device, struct Options *options, enum TARGET *target) {
 	int rc;
 	enum TARGET previous_target;
 	struct input_event ev;
@@ -405,23 +395,21 @@ int next_event(struct Device *device, struct Options *options, enum TARGET *targ
 		}
 	}
 
-	if (skip == false) {
-		switch (*target) {
-			case host:
-				rc = libevdev_uinput_write_event(device->host.uidev, ev.type, ev.code, ev.value);
-				if (rc < 0) {
-					fprintf(stderr, "failed write event\n");
-					return rc;
-				}
-				break;
-			case guest:
-				rc = libevdev_uinput_write_event(device->guest.uidev, ev.type, ev.code, ev.value);
-				if (rc < 0) {
-					fprintf(stderr, "failed write event\n");
-					return rc;
-				}
-				break;
-		}
+	switch (*target) {
+		case host:
+			rc = libevdev_uinput_write_event(device->host.uidev, ev.type, ev.code, ev.value);
+			if (rc < 0) {
+				fprintf(stderr, "failed write event\n");
+				return rc;
+			}
+			break;
+		case guest:
+			rc = libevdev_uinput_write_event(device->guest.uidev, ev.type, ev.code, ev.value);
+			if (rc < 0) {
+				fprintf(stderr, "failed write event\n");
+				return rc;
+			}
+			break;
 	}
 
 	return 0;
@@ -546,7 +534,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 
 	struct arguments *arguments = state->input;
 
-	switch (key) {//TODO add struct Options to arguments
+	switch (key) {
 		case 'v':
 			arguments->options.verbose = true;
 			break;
@@ -562,6 +550,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 				fprintf(stderr, "%s is not a valid uid or user name\n", arg);
 				return ARGP_HELP_STD_USAGE;
 			}
+			arguments->options.is_uid_set = true;
 			break;
 		case ARGP_KEY_ARG:
 			struct Device *d;
@@ -603,7 +592,7 @@ int main(int argc, char **argv) {
 	arguments.options.verbose = false;
 	arguments.options.grab = false;
 	arguments.options.no_symlink = false;
-	arguments.options.uid = -1;
+	arguments.options.is_uid_set = false;
 
 	argp_parse(&argp, argc, argv, 0, 0, &arguments);
 
@@ -657,7 +646,7 @@ int main(int argc, char **argv) {
 					d = (struct Device *) events[n].data.ptr;
 
 					for (rc = 0; !(rc < 0);) {
-						rc = next_event(d, &options, &target, false); //TODO false?
+						rc = next_event(d, &options, &target);
 						if (rc < 0) {
 							fprintf(stderr, "failed next event processing with %d\n", rc);
 						}
