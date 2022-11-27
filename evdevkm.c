@@ -118,13 +118,45 @@ int is_readable_and_writable(struct Device *device) {
 	return 0;
 }
 
+bool is_only_digit(char *s) {
+	for (int i = 0; i < strlen(s); i++) {
+		if (!isdigit(s[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 int uid_from_string(uid_t *uid, char *uid_or_user_name) {
-	//TODO
+	struct passwd *pwd;
+
+	if (is_only_digit(uid_or_user_name)) {
+		uid_t i = strtol(uid_or_user_name);
+		pwd = getpwuid(i);
+	} else {
+		pwd = getpwname(uid_or_user_name);
+	}
+
+	if (pwd == NULL) {
+		fprintf(stderr, "failed to find user for '%s'\n", uid_or_user_name);
+		return -1;
+	}
+
+	*uid = pwd.pw_uid;
+
 	return 0;
 }
 
-int initialize_options(struct Options **options) {
-	//TODO
+int initialize_options(struct Options **options, char *uid_or_user_name) {
+	int rc;
+
+	options = malloc(sizeof(struct Options));
+
+	rc = uid_from_string(&(options.uid), uid_or_user_name);
+	if (rc < 0) {
+		return rc;
+	}
+
 	return 0;
 }
 
@@ -267,9 +299,13 @@ int initialize_target(struct Device *device, enum TARGET target, int verbose) {
 		fprintf(stderr, "create uinput device: %s\n", libevdev_uinput_get_devnode(t->uidev));
 	}
 
-	rc = initialize_symlink(device, target);
-	if (rc < 0) {
-		return 0;
+	//TODO use no-symlink-arg
+	//TODO use uid arg from opions
+	if (true) {
+		rc = initialize_symlink(device, target);
+		if (rc < 0) {
+			return 0;
+		}
 	}
 
 	return 0;
@@ -578,6 +614,7 @@ int main(int argc, char **argv) {
 	argp_parse(&argp, argc, argv, 0, 0, &arguments);
 
 	if (arguments.head != NULL) {
+
 		epfd = epoll_create1(0);
 		if (epfd < 0) {
 			fprintf(stderr, "failed to create epoll file descriptor\n");
@@ -598,6 +635,7 @@ int main(int argc, char **argv) {
 				exit(1);
 			}
 		}
+
 		signal_fd = block_signals(epfd);
 		if (signal_fd < 0) {
 			fprintf(stderr, "failed to adapt interrupt signal to epoll\n");
