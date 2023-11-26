@@ -4,6 +4,30 @@
 This tool provides a software solution for switching input devices between the host operating system and a guest operating system. An arbitrary number number of devices can be specified. In short the tool works be grabbing the specified devices and routing them to either of two "virtual" devices.
 
 ## Usage
+```
+Usage: evdevkm [OPTION...] [Device...]
+Virtual keyboard and mouse switch.
+
+The switch capabilities extend to any device under '/dev/input' and the switch
+key can be specified as an option. The intended use is with the '-g' option as
+this will grab original devices and then route the input events to either the
+'host' virtual devices or the 'guest' virtual devices
+
+  -c, --code=KEY_OR_CODE     Key name or key code to be used as switch
+  -g, --grab                 Grab device
+  -n, --no-symlink           Create no symlinks
+  -p, --print-key-codes      Print key codes
+  -u, --user=UID_OR_USER     Uid or user name to assign to guest device
+  -v, --verbose              Verbose output
+  -?, --help                 Give this help list
+      --usage                Give a short usage message
+  -V, --version              Print program version
+
+Mandatory or optional arguments to long options are also mandatory or optional
+for any corresponding short options.
+
+Report bugs to /dev/null.
+```
 
 ## Conceptually
 The tool works by creating two uinput devices per device argument and then routing the device events to one or the other. The uinput devices are constructed from the original device and therefor carry the same capabilities. A hotkey is used to flip the routing of events between the two uinput devices. In order to act as a software kvm (without the 'v') switch it this program grabs the devices provided as device arguments which means that the input events are intercepted and not reaching the host os.
