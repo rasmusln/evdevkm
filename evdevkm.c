@@ -30,7 +30,9 @@ static char doc[] = "Virtual keyboard and mouse switch.\n\n"
 	" and the switch key can be specified as an option."
 	" The intended use is with the '-g' option as this will grab original devices"
 	" and then route the input events to either the 'host' virtual devices or the"
-	" 'guest' virtual devices";
+	" 'guest' virtual devices. For each device argument a virtual device for the"
+	" host is created with the name '{device}-host' and a virtual device for the"
+	" guest is created with the name '{device}-guest'.";
 
 static char args_doc[] = "[Device...]";
 
@@ -353,7 +355,7 @@ int switch_and_relay_event(struct Device *device, struct Options *options, enum 
 			break;
 	}
 
-	if (ev->type == EV_SYN && grab_at_next_ev_syn && number_of_keys_pressed == 0) {
+	if (ev->type == EV_SYN && switch_at_next_ev_syn && number_of_keys_pressed == 0) {
 		// if initialized then grab device
 		if (*target == initialized && options->grab) {
 			rc = libevdev_grab(device->device, LIBEVDEV_GRAB);
@@ -682,10 +684,6 @@ int main(int argc, char **argv) {
 				fprintf(stderr, "device %s failed to initialize\n", d->device_path);
 				cleanup(head,  &epfd, &signal_fd);
 				exit(1);
-			}
-
-			if (force_sync(d, &options, &target) < 0) {
-				fprintf(stderr, "device %s failed to force sync\n", d->device_path);
 			}
 		}
 
